@@ -57,13 +57,13 @@ Enrichment providers (`src/threat_ingestion/enrichment/providers/`):
 - **GreyNoise** (`greynoise.py`) — classifies an IP as scanner noise vs.
   worth investigating. Requires `GREYNOISE_API_KEY`; skipped (not an error)
   if unset.
-- **Censys** (`censys.py`) — ASN, geolocation, and embedded GreyNoise/threat/
-  privacy labels for a host via the Censys Platform's free, high-volume
-  enrichment endpoint (no credits consumed). Requires
-  `CENSYS_PERSONAL_ACCESS_TOKEN`. Setting `CENSYS_ENABLE_CERT_PIVOT=true`
-  additionally asks Censys which other hosts have presented a TLS certificate
-  discovered by urlscan — a strong "shared infrastructure" signal for the
-  graph engine — but requires the paid Adversary Investigation module.
+- **Censys** (`censys.py`) — host lookup for ASN, location, DNS names, observed
+  services/ports, TLS fingerprints, and embedded GreyNoise/privacy/threat
+  context via `GET /v3/global/asset/host/{ip}`. Uses a Personal Access Token
+  and the authenticated user's wallet when no `CENSYS_ORGANIZATION_ID` is set.
+  Free accounts have a one-concurrent-request limit, so this provider serializes
+  lookups. `CENSYS_ENABLE_CERT_PIVOT=true` enables a separate certificate-history
+  pivot that may require Adversary Investigation entitlement.
 - **Shodan** (`shodan.py`) — open ports/services, TLS certificate
   fingerprints, and any CVEs Shodan has flagged as exposed on the host.
   Requires `SHODAN_API_KEY`. Reported CVEs are surfaced as tags and
@@ -114,19 +114,27 @@ exploitation risk instead of just severity:
   lookups, free and keyless.
 - **NVD** (`nvd_client.py`) — on-demand CVSS score/vector + description for a
   single CVE. Works keyless at a low rate limit; `NVD_API_KEY` raises it.
+- **Shodan CVEDB** (`cvedb_client.py`) — public, keyless CVE detail (CVSS,
+  EPSS, KEV flag, affected CPEs) and product/CPE-to-CVE search. `vuln-lookup`
+  uses it first and falls back to NVD; `vuln-product --product ...` or
+  `vuln-product --cpe23 ...` searches vulnerability records.
 
 ```powershell
 threat-ingest vuln-sync                  # refresh the local KEV catalog + EPSS scores
-threat-ingest vuln-lookup CVE-2021-44228 # combined KEV + EPSS + NVD view for one CVE
+threat-ingest vuln-lookup CVE-2021-44228 # combined local KEV/EPSS + CVEDB/NVD details
+threat-ingest vuln-product --product "Apache Log4j" --kev-only # search product CVEs
+threat-ingest vuln-product --cpe23 "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*" # exact CPE
 threat-ingest report                     # includes a "Known Exploited Vulnerabilities" section
                                           # and an "Infrastructure Exposing Known Exploited
                                           # Vulnerabilities" section (Shodan CVE tags x KEV)
 ```
 
-**Known gap**: the cross-reference is tag-based (CVE IDs Shodan already
-flagged), not full CPE/version matching against NVD — a host running a
-vulnerable product that Shodan hasn't tagged with a CVE won't show up.
-Full CPE-based matching is the natural next step.
+**Scope limitation**: CVEDB product/CPE search returns vulnerabilities
+associated with a product/CPE; it does not prove a particular host runs an
+affected version. Host-to-service exposure still requires an asset observation
+source such as an entitled Shodan host lookup, Censys, or inventory/scan data.
+The existing Shodan-to-KEV infrastructure section remains based on CVE tags
+directly observed in successful Shodan host-enrichment responses.
 
 ## ATT&CK mapping and OSINT reporting (v2)
 

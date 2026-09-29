@@ -23,7 +23,10 @@ def test_rdap_provider_parses_asn_from_ip_api() -> None:
     provider = RdapProvider(settings)
     with respx.mock:
         respx.get("http://ip-api.com/json/1.2.3.4").mock(
-            return_value=Response(200, json={"as": "AS64512 Example Hosting", "asname": "EXAMPLE-AS", "countryCode": "NL"})
+            return_value=Response(
+                200,
+                json={"as": "AS64512 Example Hosting", "asname": "EXAMPLE-AS", "countryCode": "NL"},
+            )
         )
         result = asyncio.run(provider.enrich("ip", "1.2.3.4"))
     asyncio.run(provider.client.aclose())
@@ -37,12 +40,12 @@ def test_dns_provider_extracts_resolved_ips_and_nameservers() -> None:
     settings = Settings()
     provider = DnsProvider(settings)
     with respx.mock:
-        respx.get("https://cloudflare-dns.com/dns-query", params={"name": "bad.test", "type": "A"}).mock(
-            return_value=Response(200, json={"Answer": [{"data": "5.6.7.8"}]})
-        )
-        respx.get("https://cloudflare-dns.com/dns-query", params={"name": "bad.test", "type": "NS"}).mock(
-            return_value=Response(200, json={"Answer": [{"data": "ns1.example.test."}]})
-        )
+        respx.get(
+            "https://cloudflare-dns.com/dns-query", params={"name": "bad.test", "type": "A"}
+        ).mock(return_value=Response(200, json={"Answer": [{"data": "5.6.7.8"}]}))
+        respx.get(
+            "https://cloudflare-dns.com/dns-query", params={"name": "bad.test", "type": "NS"}
+        ).mock(return_value=Response(200, json={"Answer": [{"data": "ns1.example.test."}]}))
         result = asyncio.run(provider.enrich("domain", "bad.test"))
     asyncio.run(provider.client.aclose())
 
@@ -71,7 +74,11 @@ def test_urlscan_provider_collects_related_infrastructure() -> None:
                     "total": 1,
                     "results": [
                         {
-                            "page": {"ip": "9.9.9.9", "domain": "other.test", "apexDomain": "other.test"},
+                            "page": {
+                                "ip": "9.9.9.9",
+                                "domain": "other.test",
+                                "apexDomain": "other.test",
+                            },
                             "tls": {"certSHA1": "ABCDEF1234567890"},
                         }
                     ],
@@ -107,26 +114,32 @@ def test_censys_provider_skips_without_token() -> None:
     assert result.asn is None
 
 
-def test_censys_provider_parses_host_enrichment() -> None:
+def test_censys_provider_parses_free_wallet_host_lookup() -> None:
     settings = Settings(censys_personal_access_token="censys_test_token")
     provider = CensysProvider(settings)
     with respx.mock:
-        respx.get("https://api.platform.censys.io/v3/global/asset/enrichment/host/1.2.3.4").mock(
+        route = respx.get("https://api.platform.censys.io/v3/global/asset/host/1.2.3.4").mock(
             return_value=Response(
                 200,
                 json={
                     "result": {
-                        "result": {
-                            "resource": {
-                                "autonomous_system": {"asn": 64512, "name": "EXAMPLE-AS"},
-                                "location": {"country_code": "NL"},
-                                "greynoise": {"classification": "malicious"},
-                                "privacy": [{"vpn": True}],
-                                "network": [{"hosting": True}],
-                                "services": [],
-                                "service_count": 0,
-                            }
-                        }
+                        "resource": {
+                            "autonomous_system": {"asn": 64512, "name": "EXAMPLE-AS"},
+                            "location": {"country_code": "NL"},
+                            "dns": {"names": ["example.test"]},
+                            "greynoise": {"classification": "malicious"},
+                            "privacy": [{"vpn": True}],
+                            "network": [{"hosting": True}],
+                            "services": [
+                                {
+                                    "port": 443,
+                                    "service_name": "HTTPS",
+                                    "tls": {"fingerprint_sha256": "ABCDEF"},
+                                }
+                            ],
+                            "service_count": 1,
+                        },
+                        "extensions": {},
                     }
                 },
             )
@@ -138,7 +151,13 @@ def test_censys_provider_parses_host_enrichment() -> None:
     assert result.asn == 64512
     assert result.country == "NL"
     assert result.classification == "malicious"
-    assert set(result.tags) == {"vpn", "hosting-provider"}
+    assert set(result.tags) == {"vpn", "hosting-provider", "HTTPS"}
+    assert result.resolved_ips == ["1.2.3.4"]
+    assert result.related_domains == ["example.test"]
+    assert result.cert_fingerprints == ["abcdef"]
+    assert result.raw["ports"] == [443]
+    assert route.calls[0].request.headers["Accept"] == "application/vnd.censys.api.v3.host.v1+json"
+    assert "organization_id" not in route.calls[0].request.url.params
 
 
 def test_censys_cert_pivot_disabled_by_default() -> None:
@@ -151,7 +170,9 @@ def test_censys_cert_pivot_disabled_by_default() -> None:
 
 
 def test_censys_cert_pivot_returns_observed_hosts_when_enabled() -> None:
-    settings = Settings(censys_personal_access_token="censys_test_token", censys_enable_cert_pivot=True)
+    settings = Settings(
+        censys_personal_access_token="censys_test_token", censys_enable_cert_pivot=True
+    )
     provider = CensysProvider(settings)
     with respx.mock:
         respx.get(

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from threat_ingestion.application.kev_correlation import kev_exposure_matches
 from threat_ingestion.persistence.models import (
     ClusterMemberRecord,
+    EnrichmentRecord,
     IndicatorRecord,
     InfrastructureClusterRecord,
 )
@@ -81,6 +82,83 @@ def build_manual_signals(session: Session) -> list[dict[str, Any]]:
                 "observed_at": today,
                 "collected_at": collected_at,
                 "upstream_id": f"threat-ingest-exposure:{indicator_value}:{cve_id}",
+            }
+        )
+
+    indicators = {
+        indicator.id: indicator
+        for indicator in session.scalars(select(IndicatorRecord)).all()
+    }
+    latest_provider_observation: set[tuple[int, str]] = set()
+    enrichments = session.scalars(
+        select(EnrichmentRecord)
+        .where(EnrichmentRecord.provider.in_({"greynoise", "censys", "shodan"}))
+        .order_by(EnrichmentRecord.observed_at.desc(), EnrichmentRecord.id.desc())
+    ).all()
+    for enrichment in enrichments:
+        if enrichment.error or (enrichment.indicator_id, enrichment.provider) in latest_provider_observation:
+            continue
+        indicator = indicators.get(enrichment.indicator_id)
+        if indicator is None or not indicator.canonical_value.strip():
+            continue
+        has_context = any(
+            (
+                enrichment.asn,
+                enrichment.asn_name,
+                enrichment.country,
+                enrichment.classification,
+                enrichment.tags,
+                enrichment.resolved_ips,
+                enrichment.related_domains,
+                enrichment.cert_fingerprints,
+                (enrichment.raw_json or {}).get("ports"),
+                (enrichment.raw_json or {}).get("service_count"),
+            )
+        )
+        if not has_context:
+            continue
+
+        latest_provider_observation.add((enrichment.indicator_id, enrichment.provider))
+        context: list[str] = []
+        if enrichment.classification:
+            context.append(f"classification={enrichment.classification}")
+        if enrichment.asn:
+            context.append(f"ASN=AS{enrichment.asn}")
+        if enrichment.asn_name:
+            context.append(f"network={enrichment.asn_name}")
+        if enrichment.country:
+            context.append(f"country={enrichment.country}")
+        if enrichment.tags:
+            context.append(f"tags={', '.join(str(tag) for tag in enrichment.tags[:8])}")
+        if enrichment.resolved_ips:
+            context.append(f"resolved_ips={', '.join(enrichment.resolved_ips[:8])}")
+        if enrichment.related_domains:
+            context.append(f"related_domains={', '.join(enrichment.related_domains[:8])}")
+        if enrichment.cert_fingerprints:
+            context.append(f"TLS fingerprints={', '.join(enrichment.cert_fingerprints[:4])}")
+        raw_json = enrichment.raw_json or {}
+        if raw_json.get("ports"):
+            context.append(f"open_ports={', '.join(str(port) for port in raw_json['ports'][:16])}")
+        if raw_json.get("service_count") is not None:
+            context.append(f"service_count={raw_json['service_count']}")
+
+        signals.append(
+            {
+                "signal_type": "infrastructure_observation",
+                "subject": indicator.canonical_value,
+                "source": f"threat-ingest-{enrichment.provider}",
+                "source_reliability": "C",
+                "confidence": 0.35,
+                "detail": (
+                    f"{enrichment.provider} enrichment context for {indicator.canonical_value}: "
+                    f"{'; '.join(context)}. Context only; this observation alone does not establish maliciousness."
+                ),
+                "observed_at": enrichment.observed_at.date().isoformat(),
+                "collected_at": collected_at,
+                "upstream_id": (
+                    f"threat-ingest-enrichment:{enrichment.provider}:"
+                    f"{indicator.canonical_value}:{enrichment.observed_at.isoformat()}"
+                ),
             }
         )
 

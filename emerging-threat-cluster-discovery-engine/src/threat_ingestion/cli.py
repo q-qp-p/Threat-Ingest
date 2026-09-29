@@ -16,7 +16,7 @@ from .osint_reports import sync_osint_reports
 from .persistence import IngestionRepository, session_factory
 from .reporting import write_report
 from .scheduler import start_scheduler
-from .vulnerability_intel import lookup_cve, sync_kev_catalog
+from .vulnerability_intel import cvedb_client, lookup_cve, sync_kev_catalog
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -122,7 +122,7 @@ def vuln_sync() -> None:
 
 @app.command("vuln-lookup")
 def vuln_lookup(cve_id: Annotated[str, typer.Argument(help="e.g. CVE-2021-44228")]) -> None:
-    """Combine the local KEV catalog with live EPSS + NVD data for one CVE."""
+    """Combine local KEV/EPSS with Shodan CVEDB and NVD fallback for one CVE."""
     settings = get_settings()
     session = session_factory(settings.database_url)()
     try:
@@ -131,6 +131,29 @@ def vuln_lookup(cve_id: Annotated[str, typer.Argument(help="e.g. CVE-2021-44228"
         typer.echo(result.model_dump_json(indent=2))
     finally:
         session.close()
+
+
+@app.command("vuln-product")
+def vuln_product(
+    product: Annotated[str | None, typer.Option(help="Search vulnerabilities by product name.")] = None,
+    cpe23: Annotated[str | None, typer.Option(help="Search by exact CPE 2.3 identifier.")] = None,
+    kev_only: bool = typer.Option(False, help="Return only vulnerabilities listed as KEV."),
+    limit: int = typer.Option(100, min=1, max=1000, help="Maximum number of CVEs."),
+) -> None:
+    """Search public Shodan CVEDB by product/CPE; this does not identify vulnerable hosts."""
+    if bool(product) == bool(cpe23):
+        raise typer.BadParameter("specify exactly one of --product or --cpe23")
+    settings = get_settings()
+
+    async def _search() -> list[dict]:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+            return await cvedb_client.fetch_product_cves(
+                client, product or "", cpe23=cpe23, kev_only=kev_only, limit=limit
+            )
+
+    typer.echo(asyncio.run(_search()))
 
 
 @app.command("osint-sync")

@@ -31,7 +31,8 @@ def test_build_manual_signals_includes_cluster_and_kev_exposure(tmp_path: Path) 
     domain_a = IndicatorRecord(indicator_type="domain", canonical_value="bad-one.test")
     domain_b = IndicatorRecord(indicator_type="domain", canonical_value="bad-two.test")
     exposed_ip = IndicatorRecord(indicator_type="ip", canonical_value="9.9.9.9")
-    session.add_all([domain_a, domain_b, exposed_ip])
+    context_ip = IndicatorRecord(indicator_type="ip", canonical_value="8.8.8.8")
+    session.add_all([domain_a, domain_b, exposed_ip, context_ip])
     session.flush()
 
     cluster = InfrastructureClusterRecord(
@@ -85,12 +86,30 @@ def test_build_manual_signals_includes_cluster_and_kev_exposure(tmp_path: Path) 
             error=None,
         )
     )
+    session.add(
+        EnrichmentRecord(
+            indicator_id=context_ip.id,
+            provider="greynoise",
+            observed_at=now,
+            asn=15169,
+            asn_name="Google LLC",
+            country="US",
+            resolved_ips=[],
+            related_domains=[],
+            cert_fingerprints=[],
+            classification="benign",
+            tags=["Google DNS"],
+            raw_json={},
+            error=None,
+        )
+    )
     session.commit()
 
     signals = build_manual_signals(session)
 
     cluster_signals = [s for s in signals if s["signal_type"] == "multi_source_corroboration"]
     exposure_signals = [s for s in signals if s["signal_type"] == "environment_reachable"]
+    context_signals = [s for s in signals if s["signal_type"] == "infrastructure_observation"]
 
     assert len(cluster_signals) == 1
     assert cluster_signals[0]["subject"] == "TI-2026-0001"
@@ -100,6 +119,14 @@ def test_build_manual_signals_includes_cluster_and_kev_exposure(tmp_path: Path) 
     assert len(exposure_signals) == 1
     assert exposure_signals[0]["subject"] == "CVE-2021-44228"
     assert "9.9.9.9" in exposure_signals[0]["detail"]
+
+    assert len(context_signals) == 2
+    greynoise_signal = next(s for s in context_signals if s["source"] == "threat-ingest-greynoise")
+    shodan_signal = next(s for s in context_signals if s["source"] == "threat-ingest-shodan")
+    assert greynoise_signal["subject"] == "8.8.8.8"
+    assert "classification=benign" in greynoise_signal["detail"]
+    assert "does not establish maliciousness" in greynoise_signal["detail"]
+    assert shodan_signal["subject"] == "9.9.9.9"
 
     # Every emitted signal must be constructible by the companion project's
     # Signal(**entry) loader: only known fields, all required ones present.
